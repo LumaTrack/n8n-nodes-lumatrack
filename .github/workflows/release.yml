@@ -1,14 +1,13 @@
 # Publish workflow for the PUBLIC repo LumaTrack/n8n-nodes-lumatrack.
 # n8n verified nodes must be published from GitHub Actions WITH provenance
-# (mandatory since 2026-05-01). Trigger: push a tag like v0.2.0.
+# (mandatory since 2026-05-01). Trigger: push a tag like v0.3.0.
 #
-# npm side: the FIRST publish authenticates with the NPM_TOKEN repo secret
-# (npm cannot pre-register a trusted publisher for a never-published package;
-# provenance still attaches because this runs in Actions with id-token).
-# After v0.3.0 is live: configure a Trusted Publisher on npmjs.com (package
-# settings -> Trusted publishing: LumaTrack / n8n-nodes-lumatrack /
-# release.yml), revoke the token, delete the secret, and drop the
-# NODE_AUTH_TOKEN env below — OIDC then needs no secret at all.
+# Auth is OIDC trusted publishing (configured on npmjs.com: package settings
+# -> Trusted publishing: LumaTrack / n8n-nodes-lumatrack / release.yml).
+# No token, no secret. Two things this depends on:
+#   - npm CLI >= 11.5 (Node 22 bundles npm 10, hence the npm upgrade step)
+#   - no registry-url on setup-node (it writes an .npmrc that requires a
+#     NODE_AUTH_TOKEN env and fails when none is set)
 name: Release to npm
 
 on:
@@ -17,7 +16,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # provenance attestation
+  id-token: write # OIDC trusted publishing + provenance attestation
 
 jobs:
   publish:
@@ -27,9 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm run build
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
