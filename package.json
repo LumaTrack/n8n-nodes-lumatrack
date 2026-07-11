@@ -1,0 +1,51 @@
+{
+  "name": "n8n-nodes-lumatrack",
+  "version": "0.3.0",
+  "description": "Record automation run events in LumaTrack, the system of record for automation value.",
+  "keywords": [
+    "n8n-community-node-package",
+    "lumatrack",
+    "roi",
+    "automation"
+  ],
+  "license": "MIT",
+  "homepage": "https://lumatrack.io/docs/integrations/n8n/",
+  "main": "index.js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/LumaTrackApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/LumaTrack/LumaTrack.node.js",
+      "dist/nodes/LumaTrackTrigger/LumaTrackTrigger.node.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc && cp nodes/LumaTrack/lumatrack*.svg dist/nodes/LumaTrack/ && cp nodes/LumaTrackTrigger/lumatrack*.svg dist/nodes/LumaTrackTrigger/ && cp credentials/lumatrack*.svg dist/credentials/"
+  },
+  "devDependencies": {
+    "@n8n/node-cli": "^0.38.8",
+    "n8n-workflow": "^1.70.0",
+    "typescript": "^5.6.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "author": {
+    "name": "LumaTrack",
+    "email": "jonathon@lumatrack.io"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LumaTrack/n8n-nodes-lumatrack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LumaTrack/n8n-nodes-lumatrack/issues"
+  }
+}

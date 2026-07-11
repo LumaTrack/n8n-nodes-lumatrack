@@ -1,0 +1,32 @@
+# Publish workflow for the PUBLIC repo LumaTrack/n8n-nodes-lumatrack.
+# n8n verified nodes must be published from GitHub Actions WITH provenance
+# (mandatory since 2026-05-01). Trigger: push a tag like v0.2.0.
+#
+# npm side (one-time, founder): on npmjs.com, package settings -> publishing
+# access -> require two-factor or automation; either configure a *Trusted
+# Publisher* (GitHub Actions, this repo + this workflow file) so no token is
+# needed, or create a granular automation token and save it as the NPM_TOKEN
+# repo secret (then add `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` to the
+# publish step env).
+name: Release to npm
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --provenance --access public
