@@ -27,12 +27,16 @@
     ]
   },
   "scripts": {
-    "build": "tsc && cp nodes/LumaTrack/lumatrack*.svg dist/nodes/LumaTrack/ && cp nodes/LumaTrackTrigger/lumatrack*.svg dist/nodes/LumaTrackTrigger/ && cp credentials/lumatrack*.svg dist/credentials/"
+    "build": "tsc && cp nodes/LumaTrack/lumatrack*.svg dist/nodes/LumaTrack/ && cp nodes/LumaTrackTrigger/lumatrack*.svg dist/nodes/LumaTrackTrigger/ && cp credentials/lumatrack*.svg dist/credentials/",
+    "lint": "n8n-node lint",
+    "lint:fix": "n8n-node lint --fix",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@n8n/node-cli": "^0.38.8",
     "n8n-workflow": "^1.70.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   },
   "peerDependencies": {
     "n8n-workflow": "*"
