@@ -2,12 +2,13 @@
 # n8n verified nodes must be published from GitHub Actions WITH provenance
 # (mandatory since 2026-05-01). Trigger: push a tag like v0.2.0.
 #
-# npm side (one-time, founder): on npmjs.com, package settings -> publishing
-# access -> require two-factor or automation; either configure a *Trusted
-# Publisher* (GitHub Actions, this repo + this workflow file) so no token is
-# needed, or create a granular automation token and save it as the NPM_TOKEN
-# repo secret (then add `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` to the
-# publish step env).
+# npm side: the FIRST publish authenticates with the NPM_TOKEN repo secret
+# (npm cannot pre-register a trusted publisher for a never-published package;
+# provenance still attaches because this runs in Actions with id-token).
+# After v0.3.0 is live: configure a Trusted Publisher on npmjs.com (package
+# settings -> Trusted publishing: LumaTrack / n8n-nodes-lumatrack /
+# release.yml), revoke the token, delete the secret, and drop the
+# NODE_AUTH_TOKEN env below — OIDC then needs no secret at all.
 name: Release to npm
 
 on:
@@ -30,3 +31,5 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
