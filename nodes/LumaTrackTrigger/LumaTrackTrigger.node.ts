@@ -53,6 +53,7 @@ export class LumaTrackTrigger implements INodeType {
         name: 'events',
         type: 'multiOptions',
         options: [
+          { name: 'Alert Fired (Failure Spike or Volume Drop)', value: 'alert.fired' },
           { name: 'API Key Created', value: 'api_key.created' },
           { name: 'Period Closed', value: 'period.closed' },
           { name: 'Report Link Created', value: 'report_link.created' },
