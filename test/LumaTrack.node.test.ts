@@ -39,7 +39,12 @@ function executeContext({
   const context = {
     getInputData: () => items,
     getCredentials: async () => ({ baseUrl: 'https://lt.example.com/' }),
-    getNodeParameter: (name: string) => resolved[name],
+    // Item-index aware, like the real n8n runtime: a param value may be a
+    // function of the item index (models per-item expression resolution).
+    getNodeParameter: (name: string, i: number) => {
+      const value = resolved[name];
+      return typeof value === 'function' ? (value as (i: number) => unknown)(i) : value;
+    },
     continueOnFail: () => continueOnFail,
     getNode: () => ({
       id: 'node-1',
@@ -163,6 +168,250 @@ describe('LumaTrack record run', () => {
 
   it('throws a NodeApiError when Continue On Fail is off', async () => {
     await expect(run({ requestError: new Error('LumaTrack unreachable') })).rejects.toThrow();
+  });
+});
+
+const RECORD_EVENT_DEFAULTS: Record<string, unknown> = {
+  operation: 'recordEvent',
+  eventType: 'unplanned-truck-roll',
+  downtimeMinutes: -1,
+  costOverride: '',
+  eventExternalId: 'exec-77',
+  occurredAt: '',
+  eventMetadata: '{}',
+};
+
+describe('LumaTrack record incident', () => {
+  it('posts the event with source stamped and idempotency carried', async () => {
+    const { calls } = await run({ params: { ...RECORD_EVENT_DEFAULTS } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe('https://lt.example.com/api/v1/events');
+    expect(calls[0].body).toEqual({
+      event_type: 'unplanned-truck-roll',
+      source: 'n8n',
+      external_id: 'exec-77',
+    });
+  });
+
+  it('omits sentinel -1 downtime and sends a real zero', async () => {
+    const zero = await run({ params: { ...RECORD_EVENT_DEFAULTS, downtimeMinutes: 0 } });
+    expect(zero.calls[0].body).toMatchObject({ downtime_minutes: 0 });
+    const omitted = await run({ params: { ...RECORD_EVENT_DEFAULTS, downtimeMinutes: -1 } });
+    expect(omitted.calls[0].body).not.toHaveProperty('downtime_minutes');
+  });
+
+  it('sends cost override and occurred at only when set', async () => {
+    const { calls } = await run({
+      params: {
+        ...RECORD_EVENT_DEFAULTS,
+        costOverride: '412.50',
+        occurredAt: '2026-07-20T08:00:00Z',
+      },
+    });
+    expect(calls[0].body).toMatchObject({
+      cost_override: '412.50',
+      occurred_at: '2026-07-20T08:00:00Z',
+    });
+  });
+
+  it('records one incident per input item', async () => {
+    const { calls } = await run({
+      params: { ...RECORD_EVENT_DEFAULTS },
+      items: [{ json: {} }, { json: {} }],
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('fails loudly on invalid metadata JSON', async () => {
+    await expect(
+      run({ params: { ...RECORD_EVENT_DEFAULTS, eventMetadata: '{not json' } }),
+    ).rejects.toThrow(/Metadata/);
+  });
+
+  it('records an error item instead of failing the workflow under Continue On Fail', async () => {
+    const { result } = await run({
+      params: { ...RECORD_EVENT_DEFAULTS },
+      continueOnFail: true,
+      requestError: new Error('LumaTrack unreachable'),
+    });
+    expect(result).toEqual([
+      [{ json: { error: 'LumaTrack unreachable' }, pairedItem: { item: 0 } }],
+    ]);
+  });
+
+  it('defaults the external ID to a per-item unique expression', () => {
+    // A shared $execution.id would dedupe N batched incidents into 1 on the
+    // server (review round 1, high): the default must vary per item.
+    const node = new LumaTrack();
+    const property = node.description.properties.find((p) => p.name === 'eventExternalId');
+    expect(property?.default).toBe('={{$execution.id}}-{{$itemIndex}}');
+  });
+
+  it('sends distinct external IDs when the expression resolves per item', async () => {
+    const { calls } = await run({
+      params: {
+        ...RECORD_EVENT_DEFAULTS,
+        eventExternalId: (i: number) => `exec-77-${i}`,
+      },
+      items: [{ json: {} }, { json: {} }],
+    });
+    expect(calls.map((c) => c.body?.external_id)).toEqual(['exec-77-0', 'exec-77-1']);
+  });
+
+  it('sends a zero cost override instead of dropping it as falsy', async () => {
+    const { calls } = await run({
+      params: { ...RECORD_EVENT_DEFAULTS, costOverride: 0 },
+    });
+    expect(calls[0].body).toMatchObject({ cost_override: 0 });
+  });
+
+  it('refuses fractional or below-sentinel downtime instead of sending it', async () => {
+    await expect(
+      run({ params: { ...RECORD_EVENT_DEFAULTS, downtimeMinutes: 1.5 } }),
+    ).rejects.toThrow(/integer/);
+    await expect(
+      run({ params: { ...RECORD_EVENT_DEFAULTS, downtimeMinutes: -2 } }),
+    ).rejects.toThrow(/integer/);
+  });
+
+  it('refuses non-object metadata JSON', async () => {
+    await expect(
+      run({ params: { ...RECORD_EVENT_DEFAULTS, eventMetadata: '[1, 2]' } }),
+    ).rejects.toThrow(/object/);
+  });
+
+  it('turns per-item validation failures into error items under Continue On Fail', async () => {
+    const { result, calls } = await run({
+      params: {
+        ...RECORD_EVENT_DEFAULTS,
+        eventMetadata: (i: number) => (i === 0 ? '{not json' : '{}'),
+        eventExternalId: (i: number) => `exec-77-${i}`,
+      },
+      items: [{ json: {} }, { json: {} }],
+      continueOnFail: true,
+    });
+    expect(calls).toHaveLength(1);
+    const out = result[0];
+    expect(out).toHaveLength(2);
+    expect(out[0].json).toHaveProperty('error');
+    expect(out[1].json).toEqual({ ok: true, public_id: 'run_01ABC' });
+  });
+
+  it('does nothing on an empty input array', async () => {
+    const { result, calls } = await run({
+      params: { ...RECORD_EVENT_DEFAULTS },
+      items: [],
+    });
+    expect(calls).toEqual([]);
+    expect(result).toEqual([[]]);
+  });
+});
+
+describe('LumaTrack resolve incident', () => {
+  it('posts the resolution with measured downtime', async () => {
+    const { calls } = await run({
+      params: { operation: 'resolveEvent', eventId: 'evt_01XYZ', resolveDowntimeMinutes: 45 },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://lt.example.com/api/v1/events/evt_01XYZ/resolve');
+    expect(calls[0].body).toEqual({ downtime_minutes: 45 });
+  });
+
+  it('sends an empty body when downtime is the -1 sentinel', async () => {
+    const { calls } = await run({
+      params: { operation: 'resolveEvent', eventId: 'evt_01XYZ', resolveDowntimeMinutes: -1 },
+    });
+    expect(calls[0].body).toEqual({});
+  });
+
+  it('refuses an empty event ID', async () => {
+    await expect(
+      run({ params: { operation: 'resolveEvent', eventId: '', resolveDowntimeMinutes: -1 } }),
+    ).rejects.toThrow(/[Ee]vent ID/);
+  });
+
+  it('sends a real zero downtime at resolution', async () => {
+    const { calls } = await run({
+      params: { operation: 'resolveEvent', eventId: 'evt_01XYZ', resolveDowntimeMinutes: 0 },
+    });
+    expect(calls[0].body).toEqual({ downtime_minutes: 0 });
+  });
+
+  it('keeps processing later items when one event ID is empty under Continue On Fail', async () => {
+    const { result, calls } = await run({
+      params: {
+        operation: 'resolveEvent',
+        eventId: (i: number) => (i === 0 ? '' : 'evt_01XYZ'),
+        resolveDowntimeMinutes: -1,
+      },
+      items: [{ json: {} }, { json: {} }],
+      continueOnFail: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(result[0][0].json).toHaveProperty('error');
+    expect(result[0][1].json).toEqual({ ok: true, public_id: 'run_01ABC' });
+  });
+});
+
+describe('LumaTrack aggregate pairing and loadOptions', () => {
+  it('pairs the aggregate run with every contributing input item', async () => {
+    const items = [{ json: {} }, { json: {} }, { json: {} }];
+    const { result } = await run({ params: { unitsFromItems: true }, items });
+    expect(result[0][0].pairedItem).toEqual([{ item: 0 }, { item: 1 }, { item: 2 }]);
+  });
+
+  it('pairs an aggregate validation failure with every contributing input item too', async () => {
+    const items = [{ json: {} }, { json: {} }];
+    const { result, calls } = await run({
+      params: { unitsFromItems: true, metadata: '{not json' },
+      items,
+      continueOnFail: true,
+    });
+    expect(calls).toEqual([]);
+    expect(result[0][0].json).toHaveProperty('error');
+    expect(result[0][0].pairedItem).toEqual([{ item: 0 }, { item: 1 }]);
+  });
+
+  it('loads automations and event types for the dropdowns', async () => {
+    const calls: HttpCall[] = [];
+    const loadContext = {
+      getCredentials: async () => ({ baseUrl: 'https://lt.example.com/' }),
+      helpers: {
+        httpRequestWithAuthentication: async (_c: string, options: HttpCall) => {
+          calls.push(options);
+          if (options.url.endsWith('/api/v1/automations')) {
+            return {
+              automations: [
+                { slug: 'invoice-sync', name: 'Invoice sync', status: 'active' },
+                { slug: 'new-thing', name: 'New thing', status: 'candidate' },
+              ],
+            };
+          }
+          return {
+            event_types: [
+              { slug: 'wan-outage', name: 'WAN outage', is_active: true },
+              { slug: 'old-tamper', name: 'Old tamper', is_active: false },
+            ],
+          };
+        },
+      },
+    };
+    const node = new LumaTrack();
+    const automations = await node.methods.loadOptions.getAutomations.call(loadContext as never);
+    expect(automations).toEqual([
+      { name: 'Invoice sync', value: 'invoice-sync' },
+      { name: 'New thing (candidate)', value: 'new-thing' },
+    ]);
+    const eventTypes = await node.methods.loadOptions.getEventTypes.call(loadContext as never);
+    expect(eventTypes).toEqual([
+      { name: 'WAN outage', value: 'wan-outage' },
+      { name: 'Old tamper (inactive)', value: 'old-tamper' },
+    ]);
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://lt.example.com/api/v1/automations',
+      'https://lt.example.com/api/v1/event-types',
+    ]);
   });
 });
 

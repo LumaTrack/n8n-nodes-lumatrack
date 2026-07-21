@@ -7,7 +7,9 @@ report builds itself.
 
 ## Install
 
-In n8n: Settings, Community Nodes, Install, enter `n8n-nodes-lumatrack`.
+A **verified community node**: on n8n Cloud, search for "LumaTrack" in the
+nodes panel. Self-hosted: Settings, Community Nodes, Install, enter
+`n8n-nodes-lumatrack`.
 
 ## Credentials
 
@@ -17,8 +19,9 @@ In n8n: Settings, Community Nodes, Install, enter `n8n-nodes-lumatrack`.
 ## Fields
 
 Two nodes ship in this package: **LumaTrack** (operations: Record Run,
-Get ROI Summary; usable as an AI Agent tool) and **LumaTrack Trigger**
-(starts workflows from LumaTrack webhook events, signature-verified).
+Record Incident, Resolve Incident, Get ROI Summary; usable as an AI Agent
+tool) and **LumaTrack Trigger** (starts workflows from LumaTrack webhook
+events, signature-verified).
 
 | Record Run field | Notes |
 |---|---|
@@ -34,9 +37,21 @@ Get ROI Summary; usable as an AI Agent tool) and **LumaTrack Trigger**
 | Metered usage | Per-unit cost-component consumption by name |
 | Metadata | Arbitrary JSON kept with the run |
 
+**Record Incident** reports one loss event (ticket, outage, truck roll) to
+the loss ledger: pick an event type, optionally add measured downtime, a
+cost override, and an occurred-at for evidence that happened earlier. The
+External ID default (execution ID + item index) keeps retried deliveries
+from double-counting while a batch of N alerts still books N incidents.
+**Resolve Incident** stamps an incident resolved (by its evt_... ID) and
+records its total measured downtime. Responses flow through as items; a
+non-empty `ignored_fields` in a response means a misspelled field, never a
+silent success.
+
 The trigger node verifies X-LumaTrack-Signature (HMAC-SHA256 of the exact
 body) with your webhook endpoint's secret; register the trigger's URL in
-LumaTrack under Settings, Webhooks.
+LumaTrack under Settings, Webhooks. Its event filter covers the full
+outbound catalog, including incident recorded/resolved and initiative
+implemented/transitioned events.
 
 Sub-workflows report as their own executions (their execution IDs are the
 idempotency default). A node inside a loop dedupes every iteration into one

@@ -17,8 +17,10 @@ export class LumaTrack implements INodeType {
     icon: { light: 'file:lumatrack.svg', dark: 'file:lumatrack.dark.svg' },
     group: ['output'],
     version: 1,
-    subtitle: '={{$parameter["operation"] === "getSummary" ? "Get ROI Summary" : $parameter["automation"]}}',
-    description: 'Record automation run events in LumaTrack, or read the value summary',
+    subtitle:
+      '={{$parameter["operation"] === "getSummary" ? "Get ROI Summary" : $parameter["operation"] === "recordEvent" ? $parameter["eventType"] : $parameter["operation"] === "resolveEvent" ? "Resolve Incident" : $parameter["automation"]}}',
+    description:
+      'Record automation run events and incidents in LumaTrack, or read the value summary',
     defaults: { name: 'LumaTrack' },
     inputs: ['main' as NodeConnectionType],
     outputs: ['main' as NodeConnectionType],
@@ -37,10 +39,23 @@ export class LumaTrack implements INodeType {
             description: "The organization's realized value summary",
           },
           {
+            name: 'Record Incident',
+            value: 'recordEvent',
+            action: 'Record an incident',
+            description:
+              'Report one loss event (ticket, outage, truck roll) to the loss ledger',
+          },
+          {
             name: 'Record Run',
             value: 'recordRun',
             action: 'Record a run event',
             description: 'Report one execution (success or failure) to the value ledger',
+          },
+          {
+            name: 'Resolve Incident',
+            value: 'resolveEvent',
+            action: 'Resolve an incident',
+            description: 'Stamp an incident resolved and record its measured downtime',
           },
         ],
         default: 'recordRun',
@@ -198,6 +213,81 @@ export class LumaTrack implements INodeType {
         displayOptions: { show: { operation: ['recordRun'] } },
         description: 'Arbitrary JSON kept with the run',
       },
+      {
+        displayName: 'Event Type Name or ID',
+        name: 'eventType',
+        type: 'options',
+        typeOptions: { loadOptionsMethod: 'getEventTypes' },
+        default: '',
+        required: true,
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description:
+          'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
+      },
+      {
+        displayName: 'Downtime (Minutes)',
+        name: 'downtimeMinutes',
+        type: 'number',
+        default: -1,
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description:
+          'MEASURED downtime only; dollars are never estimated from a guess. -1 omits the field (0 is a real zero).',
+      },
+      {
+        displayName: 'Cost Override',
+        name: 'costOverride',
+        type: 'string',
+        default: '',
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description:
+          'The actual total cost of this event as a decimal, e.g. 412.50; empty lets LumaTrack compute it from the event type cost model',
+      },
+      {
+        displayName: 'External ID',
+        name: 'eventExternalId',
+        type: 'string',
+        default: '={{$execution.id}}-{{$itemIndex}}',
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description:
+          'Makes ingestion idempotent (a retried delivery is not a double-counted incident) and must be unique per incident: the default combines the n8n execution ID with the item index so a batch of N alerts books N incidents. Use your ticket or alert ID when one exists.',
+      },
+      {
+        displayName: 'Occurred At',
+        name: 'occurredAt',
+        type: 'string',
+        default: '',
+        placeholder: '2026-07-20T08:00:00Z',
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description:
+          'ISO 8601 timestamp for incidents that genuinely happened earlier. Leave empty for live events; frozen months are refused.',
+      },
+      {
+        displayName: 'Metadata (JSON)',
+        name: 'eventMetadata',
+        type: 'json',
+        default: '{}',
+        displayOptions: { show: { operation: ['recordEvent'] } },
+        description: 'Arbitrary JSON kept with the incident',
+      },
+      {
+        displayName: 'Event ID',
+        name: 'eventId',
+        type: 'string',
+        default: '',
+        required: true,
+        displayOptions: { show: { operation: ['resolveEvent'] } },
+        description:
+          "The incident's ID (evt_...), from a Record Incident output or an Incident Recorded trigger event",
+      },
+      {
+        displayName: 'Downtime (Minutes)',
+        name: 'resolveDowntimeMinutes',
+        type: 'number',
+        default: -1,
+        displayOptions: { show: { operation: ['resolveEvent'] } },
+        description:
+          'Total MEASURED downtime for the incident, recorded at resolution; -1 omits the field (0 is a real zero)',
+      },
     ],
 		usableAsTool: true,
   };
@@ -222,12 +312,31 @@ export class LumaTrack implements INodeType {
           value: a.slug,
         }));
       },
+      async getEventTypes(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+        const credentials = await this.getCredentials('lumaTrackApi');
+        const baseUrl = String(credentials.baseUrl).replace(/\/+$/, '');
+        const response = await this.helpers.httpRequestWithAuthentication.call(
+          this,
+          'lumaTrackApi',
+          { method: 'GET', url: `${baseUrl}/api/v1/event-types`, json: true },
+        );
+        const eventTypes = (response.event_types ?? []) as Array<{
+          slug: string;
+          name: string;
+          is_active: boolean;
+        }>;
+        return eventTypes.map((et) => ({
+          name: et.is_active ? et.name : `${et.name} (inactive)`,
+          value: et.slug,
+        }));
+      },
     },
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
     const out: INodeExecutionData[] = [];
+    if (!items.length) return [out];
     const credentials = await this.getCredentials('lumaTrackApi');
     const baseUrl = String(credentials.baseUrl).replace(/\/+$/, '');
     const operation = this.getNodeParameter('operation', 0) as string;
@@ -252,8 +361,128 @@ export class LumaTrack implements INodeType {
           { itemIndex },
         );
       }
+      if (value !== undefined && value !== null) {
+        if (typeof value !== 'object' || Array.isArray(value)) {
+          throw new NodeOperationError(
+            this.getNode(),
+            `${name} must be a JSON object (like {"hosts": 240}), not a list or scalar.`,
+            { itemIndex },
+          );
+        }
+      }
       return value && Object.keys(value as object).length ? value : undefined;
     };
+
+    // Measured minutes: -1 omits the field, anything else must be a
+    // non-negative integer — a fractional or below-sentinel value is a
+    // mapping bug, not a measurement.
+    const readMinutes = (name: string, label: string, i: number): number | undefined => {
+      const value = this.getNodeParameter(name, i) as number;
+      if (value === -1) return undefined;
+      if (!Number.isInteger(value) || value < 0) {
+        throw new NodeOperationError(
+          this.getNode(),
+          `${label} must be a non-negative integer (or -1 to omit it), got ${value}.`,
+          { itemIndex: i },
+        );
+      }
+      return value;
+    };
+
+    // One POST per item, honoring Continue On Fail the same way for every
+    // write operation: an error item instead of a failed workflow.
+    const post = async (
+      url: string,
+      body: Record<string, unknown>,
+      i: number,
+      pairedItem: INodeExecutionData['pairedItem'] = { item: i },
+    ) => {
+      try {
+        const response = await this.helpers.httpRequestWithAuthentication.call(
+          this,
+          'lumaTrackApi',
+          { method: 'POST', url, body, json: true },
+        );
+        out.push({ json: response, pairedItem });
+      } catch (requestError) {
+        if (this.continueOnFail()) {
+          out.push({ json: { error: (requestError as Error).message }, pairedItem });
+          return;
+        }
+        throw new NodeApiError(this.getNode(), requestError as JsonObject);
+      }
+    };
+
+    // Per-item validation failures become error items under Continue On
+    // Fail, exactly like delivery failures: one bad mapping must not abort
+    // the batch and discard the already-recorded items' responses. (post()
+    // never throws under Continue On Fail, so anything caught here is a
+    // validation error.)
+    const perItem = async (
+      i: number,
+      work: () => Promise<void>,
+      pairedItem: INodeExecutionData['pairedItem'] = { item: i },
+    ) => {
+      if (!this.continueOnFail()) {
+        await work();
+        return;
+      }
+      try {
+        await work();
+      } catch (validationError) {
+        out.push({
+          json: { error: (validationError as Error).message },
+          pairedItem,
+        });
+      }
+    };
+
+    if (operation === 'recordEvent') {
+      for (let i = 0; i < items.length; i++) {
+        await perItem(i, async () => {
+          const body: Record<string, unknown> = {
+            event_type: this.getNodeParameter('eventType', i),
+            source: 'n8n',
+          };
+          const downtime = readMinutes('downtimeMinutes', 'Downtime (Minutes)', i);
+          if (downtime !== undefined) body.downtime_minutes = downtime;
+          const costOverride = this.getNodeParameter('costOverride', i) as string | number;
+          if (costOverride !== '' && costOverride !== null && costOverride !== undefined) {
+            body.cost_override = costOverride;
+          }
+          const externalId = this.getNodeParameter('eventExternalId', i) as string;
+          if (externalId) body.external_id = externalId;
+          const occurredAt = this.getNodeParameter('occurredAt', i) as string;
+          if (occurredAt) body.occurred_at = occurredAt;
+          const metadata = parseJsonParameter(
+            this.getNodeParameter('eventMetadata', i),
+            'Metadata',
+            i,
+          );
+          if (metadata) body.metadata = metadata;
+          await post(`${baseUrl}/api/v1/events`, body, i);
+        });
+      }
+      return [out];
+    }
+
+    if (operation === 'resolveEvent') {
+      for (let i = 0; i < items.length; i++) {
+        await perItem(i, async () => {
+          const eventId = String(this.getNodeParameter('eventId', i) ?? '').trim();
+          if (!eventId) {
+            throw new NodeOperationError(this.getNode(), 'Event ID is required.', {
+              itemIndex: i,
+            });
+          }
+          const body: Record<string, unknown> = {};
+          const downtime = readMinutes('resolveDowntimeMinutes', 'Downtime (Minutes)', i);
+          if (downtime !== undefined) body.downtime_minutes = downtime;
+          await post(`${baseUrl}/api/v1/events/${encodeURIComponent(eventId)}/resolve`, body, i);
+        });
+      }
+      return [out];
+    }
 
     // Aggregate mode: one report per execution with units = the input item
     // count — the recommended after-a-loop pattern (all iterations of one
@@ -261,8 +490,16 @@ export class LumaTrack implements INodeType {
     // run anyway).
     const unitsFromItems = this.getNodeParameter('unitsFromItems', 0) as boolean;
     const indexes = unitsFromItems ? [0] : items.map((_item, i) => i);
+    // The aggregate run derives from every input item, so both its response
+    // and any validation error pair with all of them, not just item 0.
+    const aggregatePairs = unitsFromItems
+      ? items.map((_item, idx) => ({ item: idx }))
+      : undefined;
 
     for (const i of indexes) {
+      await perItem(
+        i,
+        async () => {
       const body: Record<string, unknown> = {
         automation: this.getNodeParameter('automation', i),
         status: this.getNodeParameter('status', i),
@@ -313,30 +550,10 @@ export class LumaTrack implements INodeType {
       const metadata = parseJsonParameter(this.getNodeParameter('metadata', i), 'Metadata', i);
       if (metadata) body.metadata = metadata;
 
-      try {
-        const response = await this.helpers.httpRequestWithAuthentication.call(
-          this,
-          'lumaTrackApi',
-          {
-            method: 'POST',
-            url: `${baseUrl}/api/v1/runs`,
-            body,
-            json: true,
-          },
-        );
-        out.push({ json: response, pairedItem: { item: i } });
-      } catch (requestError) {
-        // A LumaTrack outage must not fail the host workflow when the user
-        // opted into Continue On Fail (docs tell them to wire error paths).
-        if (this.continueOnFail()) {
-          out.push({
-            json: { error: (requestError as Error).message },
-            pairedItem: { item: i },
-          });
-          continue;
-        }
-        throw new NodeApiError(this.getNode(), requestError as JsonObject);
-      }
+      await post(`${baseUrl}/api/v1/runs`, body, i, aggregatePairs ?? { item: i });
+        },
+        aggregatePairs ?? { item: i },
+      );
     }
     return [out];
   }

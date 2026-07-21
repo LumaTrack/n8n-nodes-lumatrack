@@ -16,7 +16,7 @@ export class LumaTrackTrigger implements INodeType {
     icon: { light: 'file:lumatrack.svg', dark: 'file:lumatrack.dark.svg' },
     group: ['trigger'],
     version: 1,
-    subtitle: '={{$parameter["events"].join(", ") || "all events"}}',
+    subtitle: '={{($parameter["events"] || []).join(", ") || "all events"}}',
     description:
       'Starts a workflow when LumaTrack sends a webhook event (held runs, period closes, and more)',
     defaults: { name: 'LumaTrack Trigger' },
@@ -55,6 +55,10 @@ export class LumaTrackTrigger implements INodeType {
         options: [
           { name: 'Alert Fired (Failure Spike or Volume Drop)', value: 'alert.fired' },
           { name: 'API Key Created', value: 'api_key.created' },
+          { name: 'Incident Recorded (Loss Event)', value: 'event.recorded' },
+          { name: 'Incident Resolved', value: 'event.resolved' },
+          { name: 'Initiative Implemented', value: 'initiative.implemented' },
+          { name: 'Initiative Transitioned to Automation', value: 'initiative.transitioned' },
           { name: 'Period Closed', value: 'period.closed' },
           { name: 'Report Link Created', value: 'report_link.created' },
           { name: 'Run Held (Over Plan Cap)', value: 'run.held' },
@@ -90,7 +94,7 @@ export class LumaTrackTrigger implements INodeType {
     const request = this.getRequestObject();
     const response = this.getResponseObject();
     const secret = this.getNodeParameter('secret') as string;
-    const events = this.getNodeParameter('events') as string[];
+    const events = (this.getNodeParameter('events') as string[] | undefined) ?? [];
 
     const signature = String(request.headers['x-lumatrack-signature'] ?? '');
     // The signature covers the exact bytes sent; rawBody is what n8n
@@ -98,9 +102,14 @@ export class LumaTrackTrigger implements INodeType {
     const rawBody = (request as unknown as { rawBody?: Buffer }).rawBody;
     const body: Buffer = rawBody ?? Buffer.from(JSON.stringify(request.body ?? {}));
     const expected = createHmac('sha256', secret).update(body).digest('hex');
+    // Compare BYTE lengths: a multi-byte signature can match on character
+    // length yet differ in bytes, and timingSafeEqual throws on unequal
+    // buffers — an invalid signature must be a 401, never a 500.
+    const signatureBytes = Buffer.from(signature);
+    const expectedBytes = Buffer.from(expected);
     const valid =
-      signature.length === expected.length &&
-      timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+      signatureBytes.length === expectedBytes.length &&
+      timingSafeEqual(signatureBytes, expectedBytes);
     if (!valid) {
       response.status(401).json({ error: 'invalid signature' });
       return { noWebhookResponse: true };
